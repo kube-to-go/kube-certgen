@@ -4,8 +4,6 @@ on:
   push:
     branches:
     - main
-    paths:
-    - Containerfile
   schedule:
   # Every Saturday at 0300Z
   - cron: '0 3 * * 6'
