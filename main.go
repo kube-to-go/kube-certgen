@@ -26,7 +26,7 @@ import (
 )
 
 func main() {
-	commonName, hosts, namespace, secretName := getParameters()
+	commonName, hosts, namespace, secretName, configMapName := getParameters()
 
 	log.Printf("Generating certificate (CN: \"%s\")...\n", commonName)
 	certPEM, keyPEM, err := generateCertificate(commonName, hosts)
@@ -37,18 +37,29 @@ func main() {
 
 	fmt.Printf(string(certPEM))
 
-	if namespace != "" && secretName != "" {
-		log.Printf("Applying secret \"%s\" (namespace \"%s\")...\n", secretName, namespace)
-		deploySecret(namespace, secretName, certPEM, keyPEM)
-		log.Printf("Secret \"%s\" (namespace \"%s\") successfully applied\n", secretName, namespace)
+	if namespace != "" {
+		cs := clientset()
+
+		if secretName != "" {
+			log.Printf("Applying secret \"%s\" (namespace \"%s\")...\n", secretName, namespace)
+			deploySecret(cs, namespace, secretName, certPEM, keyPEM)
+			log.Printf("Secret \"%s\" (namespace \"%s\") successfully applied\n", secretName, namespace)
+		}
+
+		if configMapName != "" {
+			log.Printf("Applying config map \"%s\" (namespace \"%s\")...\n", secretName, namespace)
+			deployConfigMap(cs, namespace, configMapName, certPEM)
+			log.Printf("Config map \"%s\" (namespace \"%s\") successfully applied\n", secretName, namespace)
+		}
 	}
 }
 
-func getParameters() (string, []string, string, string) {
+func getParameters() (string, []string, string, string, string) {
 	commonName := os.Getenv("CERT_CN")
 	rawHosts := os.Getenv("CERT_HOSTS")
 	namespace := os.Getenv("NAMESPACE")
 	secretName := os.Getenv("SECRET")
+	configMapName := os.Getenv("CONFIGMAP")
 
 	if commonName == "" {
 		// if secretName == "" || namespace == "" || commonName == "" {
@@ -62,8 +73,9 @@ func getParameters() (string, []string, string, string) {
 	log.Printf("CERT_HOSTS: %s\n", hosts)
 	log.Printf("NAMESPACE:  %s\n", namespace)
 	log.Printf("SECRET:     %s\n", secretName)
+	log.Printf("CONFIGMAP:  %s\n", configMapName)
 
-	return commonName, hosts, namespace, secretName
+	return commonName, hosts, namespace, secretName, configMapName
 }
 
 func splitOn(value string, delimiter string) []string {
@@ -158,7 +170,7 @@ func formatFingerprint(hash []byte) string {
 	return buffer.String()
 }
 
-func deploySecret(namespace string, secretName string, certPEM []byte, keyPEM []byte) {
+func clientset() kubernetes.Clientset {
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		log.Fatalf("Error creating kubernetes in-cluster config: %v", err)
@@ -169,6 +181,10 @@ func deploySecret(namespace string, secretName string, certPEM []byte, keyPEM []
 		log.Fatalf("Error creating kubernetes clientset: %v", err)
 	}
 
+	return *clientset
+}
+
+func deploySecret(clientset kubernetes.Clientset, namespace string, secretName string, certPEM []byte, keyPEM []byte) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
@@ -181,11 +197,31 @@ func deploySecret(namespace string, secretName string, certPEM []byte, keyPEM []
 		},
 	}
 
-	_, err = clientset.CoreV1().Secrets(namespace).Create(context.TODO(), secret, metav1.CreateOptions{})
+	_, err := clientset.CoreV1().Secrets(namespace).Create(context.TODO(), secret, metav1.CreateOptions{})
 	if err != nil {
 		_, err = clientset.CoreV1().Secrets(namespace).Update(context.TODO(), secret, metav1.UpdateOptions{})
 		if err != nil {
 			log.Fatalf("Failed to create or update secret: %v", err)
+		}
+	}
+}
+
+func deployConfigMap(clientset kubernetes.Clientset, namespace string, configMapName string, certPEM []byte) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      configMapName,
+			Namespace: namespace,
+		},
+		Data: map[string]string{
+			"tls.crt": string(certPEM),
+		},
+	}
+
+	_, err := clientset.CoreV1().ConfigMaps(namespace).Create(context.TODO(), cm, metav1.CreateOptions{})
+	if err != nil {
+		_, err = clientset.CoreV1().ConfigMaps(namespace).Update(context.TODO(), cm, metav1.UpdateOptions{})
+		if err != nil {
+			log.Fatalf("Failed to create or update config map: %v", err)
 		}
 	}
 }
