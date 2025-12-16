@@ -14,7 +14,9 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"net"
 	"os"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -24,10 +26,10 @@ import (
 )
 
 func main() {
-	namespace, secretName, commonName := getParameters()
+	commonName, hosts, namespace, secretName := getParameters()
 
 	log.Printf("Generating certificate (CN: \"%s\")...\n", commonName)
-	certPEM, keyPEM, err := generateSelfSignedCert(commonName)
+	certPEM, keyPEM, err := generateCertificate(commonName, hosts)
 	if err != nil {
 		log.Fatalf("Error generating certificate: %v", err)
 	}
@@ -42,20 +44,39 @@ func main() {
 	}
 }
 
-func getParameters() (string, string, string) {
+func getParameters() (string, []string, string, string) {
+	commonName := os.Getenv("CERT_CN")
+	rawHosts := os.Getenv("CERT_HOSTS")
 	namespace := os.Getenv("NAMESPACE")
 	secretName := os.Getenv("SECRET")
-	commonName := os.Getenv("CERT_CN")
 
 	if commonName == "" {
 		// if secretName == "" || namespace == "" || commonName == "" {
-		log.Fatalf("SECRET, NAMESPACE, and CERT_CN environment variables must be set")
+		log.Fatalf("The CERT_CN environment variables must be set")
+		// log.Fatalf("SECRET, NAMESPACE, and CERT_CN environment variables must be set")
 	}
 
-	return namespace, secretName, commonName
+	hosts := splitOn(rawHosts, ",")
+
+	log.Printf("CERT_CN:    %s\n", commonName)
+	log.Printf("CERT_HOSTS: %s\n", hosts)
+	log.Printf("NAMESPACE:  %s\n", namespace)
+	log.Printf("SECRET:     %s\n", secretName)
+
+	return commonName, hosts, namespace, secretName
 }
 
-func generateSelfSignedCert(commonName string) ([]byte, []byte, error) {
+func splitOn(value string, delimiter string) []string {
+	parts := strings.Split(value, delimiter)
+
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+
+	return parts
+}
+
+func generateCertificate(commonName string, hosts []string) ([]byte, []byte, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, err
@@ -78,6 +99,15 @@ func generateSelfSignedCert(commonName string) ([]byte, []byte, error) {
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 		IsCA:                  true,
+	}
+
+	// Add SANs
+	for _, h := range hosts {
+		if ip := net.ParseIP(h); ip != nil {
+			template.IPAddresses = append(template.IPAddresses, ip)
+		} else {
+			template.DNSNames = append(template.DNSNames, h)
+		}
 	}
 
 	// Create self-signed certificate
