@@ -1,4 +1,6 @@
 .dockerignore
+.env
 .github
+.gitignore
 Containerfile
 justfile
