@@ -38,7 +38,7 @@ func main() {
 	if namespace != "" && secretName != "" {
 		log.Printf("Applying secret \"%s\" (namespace \"%s\")...\n", secretName, namespace)
 		deploySecret(namespace, secretName, certPEM, keyPEM)
-		fmt.Printf("Secret \"%s\" (namespace \"%s\") successfully applied\n", secretName, namespace)
+		log.Printf("Secret \"%s\" (namespace \"%s\") successfully applied\n", secretName, namespace)
 	}
 }
 
