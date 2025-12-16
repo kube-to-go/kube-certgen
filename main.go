@@ -1,23 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/sha1"
-	"crypto/sha256"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"fmt"
 	"log"
-	"math/big"
-	"net"
 	"os"
 	"strings"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,57 +13,122 @@ import (
 	"k8s.io/client-go/rest"
 )
 
+type Parameters struct {
+	rootCAConfigMapNamespace string
+	rootCAConfigMapName      string
+	rootCASecretNamespace    string
+	rootCASecretName         string
+	rootCACertCN             string
+
+	leafConfigMapNamespace string
+	leafConfigMapName      string
+	leafSecretNamespace    string
+	leafSecretName         string
+	leafCertCN             string
+	leafCertHosts          []string
+}
+
 func main() {
-	commonName, hosts, namespace, secretName, configMapName := getParameters()
+	log.Printf("Starting...")
 
-	log.Printf("Generating certificate (CN: \"%s\")...\n", commonName)
-	certPEM, keyPEM, err := generateCertificate(commonName, hosts)
+	params := getParameters()
+
+	rootCACert, err := generateRootCACert(params.rootCACertCN)
 	if err != nil {
-		log.Fatalf("Error generating certificate: %v", err)
+		log.Fatalf("Error generating root CA certificate: %v", err)
 	}
-	log.Printf("Certificate (CN: \"%s\") generated successfully.\n", commonName)
+	log.Printf("Generated root CA certificate")
+	log.Printf("FP (sha1):    %s", rootCACert.fpSha1)
+	log.Printf("FP (sha256):  %s", rootCACert.fpSha256)
+	fmt.Printf(rootCACert.certPEM)
 
-	fmt.Printf(string(certPEM))
+	leafCert, err := generateLeafCert(params.leafCertCN, params.leafCertHosts, rootCACert)
+	if err != nil {
+		log.Fatalf("Error generating leaf certificate: %v", err)
+	}
+	log.Printf("Generated leaf certificate")
+	log.Printf("FP (sha1):    %s", leafCert.fpSha1)
+	log.Printf("FP (sha256):  %s", leafCert.fpSha256)
+	fmt.Printf(leafCert.certPEM)
 
-	if namespace != "" {
+	if params.rootCAConfigMapNamespace != "" ||
+		params.rootCASecretNamespace != "" ||
+		params.leafConfigMapNamespace != "" ||
+		params.leafSecretNamespace != "" {
+
 		cs := clientset()
 
-		if secretName != "" {
-			log.Printf("Applying secret \"%s\" (namespace \"%s\")...\n", secretName, namespace)
-			deploySecret(cs, namespace, secretName, certPEM, keyPEM)
-			log.Printf("Secret \"%s\" (namespace \"%s\") successfully applied\n", secretName, namespace)
+		if params.rootCASecretNamespace != "" && params.rootCASecretName != "" {
+			deploySecret(cs, params.rootCASecretNamespace, params.rootCASecretName, rootCACert.certPEM, rootCACert.privateKeyPEM)
 		}
 
-		if configMapName != "" {
-			log.Printf("Applying config map \"%s\" (namespace \"%s\")...\n", secretName, namespace)
-			deployConfigMap(cs, namespace, configMapName, certPEM)
-			log.Printf("Config map \"%s\" (namespace \"%s\") successfully applied\n", secretName, namespace)
+		if params.rootCAConfigMapNamespace != "" && params.rootCAConfigMapName != "" {
+			deployConfigMap(cs, params.rootCAConfigMapNamespace, params.rootCAConfigMapName, rootCACert.certPEM)
+		}
+
+		if params.leafSecretNamespace != "" && params.leafSecretName != "" {
+			deploySecret(cs, params.leafSecretNamespace, params.leafSecretName, leafCert.certPEM, leafCert.privateKeyPEM)
+		}
+
+		if params.leafConfigMapNamespace != "" && params.leafConfigMapName != "" {
+			deployConfigMap(cs, params.leafConfigMapNamespace, params.leafConfigMapName, leafCert.certPEM)
 		}
 	}
 }
 
-func getParameters() (string, []string, string, string, string) {
-	commonName := os.Getenv("CERT_CN")
-	rawHosts := os.Getenv("CERT_HOSTS")
-	namespace := os.Getenv("NAMESPACE")
-	secretName := os.Getenv("SECRET")
-	configMapName := os.Getenv("CONFIGMAP")
+func getParameters() Parameters {
+	var params = Parameters{
+		rootCAConfigMapNamespace: os.Getenv("ROOT_CA_CM_NAMESPACE"),
+		rootCAConfigMapName:      os.Getenv("ROOT_CA_CM_NAME"),
+		rootCASecretNamespace:    os.Getenv("ROOT_CA_SECRET_NAMESPACE"),
+		rootCASecretName:         os.Getenv("ROOT_CA_SECRET_NAME"),
+		rootCACertCN:             os.Getenv("ROOT_CA_CERT_CN"),
 
-	if commonName == "" {
-		// if secretName == "" || namespace == "" || commonName == "" {
-		log.Fatalf("The CERT_CN environment variables must be set")
-		// log.Fatalf("SECRET, NAMESPACE, and CERT_CN environment variables must be set")
+		leafConfigMapNamespace: os.Getenv("LEAF_CM_NAMESPACE"),
+		leafConfigMapName:      os.Getenv("LEAF_CM_NAME"),
+		leafSecretNamespace:    os.Getenv("LEAF_SECRET_NAMESPACE"),
+		leafSecretName:         os.Getenv("LEAF_SECRET_NAME"),
+		leafCertCN:             os.Getenv("LEAF_CERT_CN"),
+		leafCertHosts:          splitOn(os.Getenv("LEAF_CERT_HOSTS"), ","),
 	}
 
-	hosts := splitOn(rawHosts, ",")
+	var commonNamespace = os.Getenv("NAMESPACE")
+	var rootCANamespace = os.Getenv("ROOT_CA_NAMESPACE")
+	var leafNamespace = os.Getenv("LEAF_NAMESPACE")
 
-	log.Printf("CERT_CN:    %s\n", commonName)
-	log.Printf("CERT_HOSTS: %s\n", hosts)
-	log.Printf("NAMESPACE:  %s\n", namespace)
-	log.Printf("SECRET:     %s\n", secretName)
-	log.Printf("CONFIGMAP:  %s\n", configMapName)
+	if rootCANamespace == "" {
+		rootCANamespace = commonNamespace
+	}
+	if leafNamespace == "" {
+		leafNamespace = commonNamespace
+	}
 
-	return commonName, hosts, namespace, secretName, configMapName
+	if rootCANamespace != "" {
+		if params.rootCAConfigMapNamespace == "" {
+			params.rootCAConfigMapNamespace = rootCANamespace
+		}
+		if params.rootCASecretNamespace == "" {
+			params.rootCASecretNamespace = rootCANamespace
+		}
+	}
+	if leafNamespace != "" {
+		if params.leafConfigMapNamespace == "" {
+			params.leafConfigMapNamespace = leafNamespace
+		}
+		if params.leafSecretNamespace == "" {
+			params.leafSecretNamespace = leafNamespace
+		}
+	}
+
+	if params.rootCACertCN == "" {
+		params.rootCACertCN = "Root CA"
+	}
+
+	if params.leafCertCN == "" {
+		params.leafCertCN = "Leaf"
+	}
+
+	return params
 }
 
 func splitOn(value string, delimiter string) []string {
@@ -86,88 +139,6 @@ func splitOn(value string, delimiter string) []string {
 	}
 
 	return parts
-}
-
-func generateCertificate(commonName string, hosts []string) ([]byte, []byte, error) {
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	serialNumber, err := rand.Int(rand.Reader, big.NewInt(1<<62))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// TODO: configurable duration
-	template := x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			CommonName: commonName,
-		},
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(90 * 24 * time.Hour), // 90 days
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-	}
-
-	// Add SANs
-	for _, h := range hosts {
-		if ip := net.ParseIP(h); ip != nil {
-			template.IPAddresses = append(template.IPAddresses, ip)
-		} else {
-			template.DNSNames = append(template.DNSNames, h)
-		}
-	}
-
-	// Create self-signed certificate
-	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	fpSha1, fpSha256 := certFingerprint(derBytes)
-	log.Printf("FP (sha1):    %s", fpSha1)
-	log.Printf("FP (sha256):  %s", fpSha256)
-
-	// PEM-encode certificate
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
-
-	// PEM-encode private key
-	keyBytes, err := x509.MarshalECPrivateKey(priv)
-	if err != nil {
-		return nil, nil, err
-	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
-
-	return certPEM, keyPEM, nil
-}
-
-func certFingerprint(certDER []byte) (string, string) {
-	cert, err := x509.ParseCertificate(certDER)
-	if err != nil {
-		panic(err)
-	}
-
-	sha256sum := sha256.Sum256(cert.Raw)
-	sha1sum := sha1.Sum(cert.Raw)
-
-	return formatFingerprint(sha1sum[:]), formatFingerprint(sha256sum[:])
-}
-
-func formatFingerprint(hash []byte) string {
-	var buffer bytes.Buffer
-
-	for i, b := range hash {
-		if i > 0 {
-			buffer.WriteByte(':')
-		}
-		fmt.Fprintf(&buffer, "%02X", b)
-	}
-
-	return buffer.String()
 }
 
 func clientset() kubernetes.Clientset {
@@ -184,7 +155,9 @@ func clientset() kubernetes.Clientset {
 	return *clientset
 }
 
-func deploySecret(clientset kubernetes.Clientset, namespace string, secretName string, certPEM []byte, keyPEM []byte) {
+func deploySecret(clientset kubernetes.Clientset, namespace string, secretName string, certPEM string, keyPEM string) {
+	log.Printf("Applying secret \"%s\" (namespace \"%s\")...\n", secretName, namespace)
+
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
@@ -192,8 +165,8 @@ func deploySecret(clientset kubernetes.Clientset, namespace string, secretName s
 		},
 		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
-			"tls.crt": certPEM,
-			"tls.key": keyPEM,
+			"tls.crt": []byte(certPEM),
+			"tls.key": []byte(keyPEM),
 		},
 	}
 
@@ -204,9 +177,13 @@ func deploySecret(clientset kubernetes.Clientset, namespace string, secretName s
 			log.Fatalf("Failed to create or update secret: %v", err)
 		}
 	}
+
+	log.Printf("Secret \"%s\" (namespace \"%s\") successfully applied\n", secretName, namespace)
 }
 
-func deployConfigMap(clientset kubernetes.Clientset, namespace string, configMapName string, certPEM []byte) {
+func deployConfigMap(clientset kubernetes.Clientset, namespace string, configMapName string, certPEM string) {
+	log.Printf("Applying config map \"%s\" (namespace \"%s\")...\n", configMapName, namespace)
+
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      configMapName,
@@ -224,4 +201,6 @@ func deployConfigMap(clientset kubernetes.Clientset, namespace string, configMap
 			log.Fatalf("Failed to create or update config map: %v", err)
 		}
 	}
+
+	log.Printf("Config map \"%s\" (namespace \"%s\") successfully applied\n", configMapName, namespace)
 }
